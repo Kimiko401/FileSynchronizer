@@ -102,42 +102,76 @@ $btnToggle.Add_Click({
             return 
         }
         
-        # 1. Initialize Watcher
+        # --- Safety Confirmation ---
+        $confirm = [System.Windows.Forms.MessageBox]::Show(
+            "This will DELETE all files in the local folder and overwrite them with the remote files. Do you want to continue?", 
+            "Warning", 
+            [System.Windows.Forms.MessageBoxButtons]::YesNo, 
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($confirm -eq [System.Windows.Forms.DialogResult]::No) { return }
+
+        # --- Clear Local Directory ---
+        $statusLabel.Text = "Status: Clearing local folder..."
+        $btnToggle.Enabled = $false # Disable button temporarily
+        [System.Windows.Forms.Application]::DoEvents() 
+
+        # Delete contents but leave the root directory intact
+        Get-ChildItem -Path $txtLocal.Text -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+
+        # --- Clone Remote to Local (NON-BLOCKING) ---
+        $statusLabel.Text = "Status: Cloning remote files (this may take a while)..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $remoteFetchPath = $txtRemote.Text
+        if (-not $remoteFetchPath.EndsWith("/")) { $remoteFetchPath += "/" }
+        $remoteFetchPath += "*"
+
+        # Start the process with -PassThru so we can monitor it, REMOVE -Wait
+        $syncProcess = Start-Process scp -ArgumentList "-r", "-i", $txtKey.Text, "-o", "BatchMode=yes", $remoteFetchPath, $txtLocal.Text -WindowStyle Hidden -PassThru
+
+        # Keep the UI alive while waiting for the process to finish
+        while (-not $syncProcess.HasExited) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 100
+        }
+
+        $statusLabel.Text = "Status: Initiating file watcher..."
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        # --- Initialize Watcher ---
         $global:watcher = New-Object System.IO.FileSystemWatcher $txtLocal.Text, "*.*"
         $global:watcher.IncludeSubdirectories = $true
         $global:watcher.EnableRaisingEvents = $true
         
-        # 2. Package Variables into MessageData
         $eventData = @{
             KeyPath = $txtKey.Text
             RemotePath = $txtRemote.Text
         }
         
-        # 3. Define the Action (Using $Event.MessageData to pass variables inside)
         $action = {
             $path = $Event.SourceEventArgs.FullPath
             $key = $Event.MessageData.KeyPath
             $remote = $Event.MessageData.RemotePath
             
-            # Arrays passed to ArgumentList automatically handle spaces in paths
             Start-Process scp -ArgumentList "-i", $key, "-o", "BatchMode=yes", $path, $remote -WindowStyle Hidden
         }
         
-        # Register the Event
         $global:eventSubscriber = Register-ObjectEvent -InputObject $global:watcher -EventName "Changed" -MessageData $eventData -Action $action
         
-        # Update UI
+        # --- Update UI ---
         $btnToggle.Text = "Stop Sync"
         $btnToggle.BackColor = $danger
+        $btnToggle.Enabled = $true
         $statusLabel.Text = "Status: Monitoring for changes..."
     } else {
-        # 1. Stop the events
+        # Stop the events
         $global:watcher.EnableRaisingEvents = $false
         
-        # 2. Unregister and cleanup
+        # Unregister and cleanup
         if ($global:eventSubscriber) {
             Unregister-Event -SourceIdentifier $global:eventSubscriber.Name
-            Remove-Job -Name $global:eventSubscriber.Name # Cleans up the background job created by the event
+            Remove-Job -Name $global:eventSubscriber.Name 
             $global:eventSubscriber = $null
         }
         
